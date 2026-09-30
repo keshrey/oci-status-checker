@@ -32,6 +32,7 @@ jobs:
           OCI_EMAIL:          ${{ secrets.OCI_EMAIL }}
           OCI_PASSWORD:       ${{ secrets.OCI_PASSWORD }}
           NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
           LAST_KNOWN_STATUS:  ${{ vars.LAST_KNOWN_STATUS }}
           GH_TOKEN:           ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY:  ${{ github.repository }}

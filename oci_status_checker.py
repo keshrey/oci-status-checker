@@ -8,6 +8,7 @@ Status is persisted via GitHub Variable LAST_KNOWN_STATUS (updated via API).
 """
 
 import os
+import re
 import sys
 import json
 import datetime
@@ -80,6 +81,113 @@ def update_last_known_status(new_status: str):
         print(f"  Could not update GitHub Variable: {e}")
 
 
+def _solve_captcha_claude(img_bytes: bytes) -> str | None:
+    """Use Claude Vision API to read captcha — most accurate."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return None
+    import base64, json
+    b64 = base64.b64encode(img_bytes).decode()
+    payload = {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 50,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                {"type": "text", "text": "Read the CAPTCHA text exactly — letters and digits, case-sensitive. Reply with ONLY the captcha characters, no spaces or explanation."}
+            ]
+        }]
+    }
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(payload).encode(),
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+        method="POST"
+    )
+    resp = urllib.request.urlopen(req, timeout=15)
+    data = json.loads(resp.read())
+    result = re.sub(r"[^A-Za-z0-9]", "", data["content"][0]["text"].strip())
+    print(f"  Claude Vision result: {result!r}")
+    return result if result else None
+
+
+def _solve_captcha_tesseract(img_bytes: bytes, attempt_num: int) -> str | None:
+    """Fallback OCR via pytesseract."""
+    try:
+        import pytesseract
+        from PIL import Image, ImageFilter, ImageEnhance
+        import io
+
+        raw_img = Image.open(io.BytesIO(img_bytes))
+        raw_img = raw_img.resize((raw_img.width * 4, raw_img.height * 4), Image.LANCZOS)
+        raw_img = raw_img.convert("L")
+
+        light_img = ImageEnhance.Contrast(raw_img).enhance(1.5)
+        light_img = light_img.filter(ImageFilter.SHARPEN)
+
+        bin_img = ImageEnhance.Contrast(raw_img).enhance(2.0)
+        bin_img = bin_img.filter(ImageFilter.SHARPEN)
+        bin_img = bin_img.point(lambda x: 0 if x < 160 else 255, "1").convert("L")
+
+        bin_img.save(SCREENSHOT_DIR / f"captcha_processed_{attempt_num}.png")
+        light_img.save(SCREENSHOT_DIR / f"captcha_light_{attempt_num}.png")
+
+        whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        candidates = []
+        for img_variant, label in [(light_img, "light"), (bin_img, "binary")]:
+            for oem in [1, 3]:
+                for psm in [7, 8, 13]:
+                    t = pytesseract.image_to_string(
+                        img_variant,
+                        config=f"--psm {psm} --oem {oem} -c tessedit_char_whitelist={whitelist}"
+                    ).strip().replace(" ", "")
+                    if t:
+                        print(f"  Tesseract {label} oem={oem} psm={psm}: {t!r} (len={len(t)})")
+                        candidates.append(t)
+
+        for t in candidates:
+            if len(t) == 6:
+                return t
+        for t in candidates:
+            if 5 <= len(t) <= 7:
+                return t
+        return None
+    except ImportError:
+        print("  pytesseract not installed")
+        return None
+    except Exception as e:
+        print(f"  Tesseract error: {e}")
+        return None
+
+
+def _solve_captcha(page, attempt_num: int = 0) -> str | None:
+    """Read captcha from page: try Claude Vision first, then pytesseract."""
+    CAPTCHA_SEL = (
+        "img[src*='captcha' i], img[alt*='captcha' i], .captcha img, "
+        "#captchaImg, img[id*='captcha' i]"
+    )
+    captcha_img = page.query_selector(CAPTCHA_SEL)
+    if not captcha_img:
+        print("  Could not find captcha image element")
+        return None
+
+    src = captcha_img.get_attribute("src") or ""
+    print(f"  Captcha img src: {src[:80]}")
+
+    img_bytes = captcha_img.screenshot()
+    raw_path = SCREENSHOT_DIR / f"captcha_raw_{attempt_num}.png"
+    raw_path.write_bytes(img_bytes)
+    print(f"  Raw captcha saved: {raw_path}")
+
+    result = _solve_captcha_claude(img_bytes)
+    if result:
+        return result
+
+    print("  Claude Vision unavailable — falling back to pytesseract")
+    return _solve_captcha_tesseract(img_bytes, attempt_num)
+
+
 def check_status() -> str | None:
     print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Checking OCI status…")
 
@@ -101,61 +209,123 @@ def check_status() -> str | None:
             page.screenshot(path=str(SCREENSHOT_DIR / "01_login_page.png"))
             print(f"  Page title: {page.title()}")
 
-            # Fill email
-            email_sel = "input[type='email'], input[name*='email' i], input[id*='email' i], input[name*='user' i]"
+            # Click "User Login" in top nav to reach login form
+            page.click("text=User Login")
+            page.wait_for_load_state("networkidle")
+            page.screenshot(path=str(SCREENSHOT_DIR / "02_login_form.png"))
+            print(f"  Login form URL: {page.url}")
+
+            # Fill credentials
+            email_sel = "input[placeholder*='Email' i], input[type='email'], input[name*='email' i], input[id*='email' i]"
             page.wait_for_selector(email_sel, timeout=10000)
             page.fill(email_sel, OCI_EMAIL)
-
-            # Fill password
             page.fill("input[type='password']", OCI_PASSWORD)
-            page.screenshot(path=str(SCREENSHOT_DIR / "02_credentials_filled.png"))
 
-            # Submit
-            page.click("button[type='submit'], input[type='submit']")
-            page.wait_for_load_state("networkidle")
-            page.screenshot(path=str(SCREENSHOT_DIR / "03_after_login.png"))
-            print(f"  Post-login URL: {page.url}")
+            page.screenshot(path=str(SCREENSHOT_DIR / "03_credentials_filled.png"))
+
+            # Submit — retry up to 3 times on captcha mismatch
+            logged_in = False
+            for attempt in range(1, 4):
+                captcha_text = _solve_captcha(page, attempt_num=attempt)
+                print(f"  Captcha OCR attempt {attempt}: {captcha_text!r}")
+                if captcha_text:
+                    page.fill("input[placeholder*='CAPTCHA' i], input[name*='captcha' i], input[id*='captcha' i]", captcha_text)
+                page.click("button:has-text('LOGIN'), button[type='submit'], input[type='submit']")
+                page.wait_for_load_state("networkidle")
+                print(f"  Post-login URL (attempt {attempt}): {page.url}")
+
+                page_text = page.inner_text("body").lower()
+                captcha_error = any(
+                    phrase in page_text
+                    for phrase in ["captcha mismatch", "invalid captcha", "valid captcha", "enter captcha"]
+                )
+                if captcha_error:
+                    print(f"  Captcha error — reloading login page for fresh captcha…")
+                    page.goto(f"{BASE_URL}/onlineOCI/login", wait_until="networkidle")
+                    page.wait_for_timeout(500)
+                    page.fill(email_sel, OCI_EMAIL)
+                    page.fill("input[type='password']", OCI_PASSWORD)
+                    continue
+
+                # No captcha error — assume logged in
+                logged_in = True
+                break
+
+            page.screenshot(path=str(SCREENSHOT_DIR / "04_after_login.png"))
+
+            # ── Navigate to View Status ──────────────────────────────────────
+            page.screenshot(path=str(SCREENSHOT_DIR / "04_dashboard.png"))
+
+            # Wait a bit extra for any AJAX status sections to load
+            page.wait_for_timeout(2000)
+
+            view_status_link = page.query_selector("a:has-text('View Status'), a:has-text('view status')")
+            if view_status_link:
+                href = view_status_link.get_attribute("href") or ""
+                print(f"  View Status href: {href!r}")
+                if href.startswith("javascript:"):
+                    # Extract and call the JS function directly
+                    js_call = href[len("javascript:"):]
+                    print(f"  Calling JS: {js_call}")
+                    page.evaluate(js_call)
+                else:
+                    view_status_link.click()
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(2000)
+                page.screenshot(path=str(SCREENSHOT_DIR / "05_status_page.png"))
+                print(f"  Status page URL: {page.url}")
 
             # ── Extract status ───────────────────────────────────────────────
             body_text = page.inner_text("body")
-            print(f"\n  --- Page text (first 1000 chars) ---")
-            print(body_text[:1000])
+            print(f"\n  --- Page text (first 2000 chars) ---")
+            print(body_text[:2000])
             print(f"  ---\n")
 
             status_text = None
 
-            # Try CSS selectors for status elements
-            for sel in [
-                "[class*='status' i]", "[id*='status' i]",
-                "[class*='stage' i]",  "[id*='stage' i]",
-                "td.status", ".application-status", "#applicationStatus",
-            ]:
-                els = page.query_selector_all(sel)
-                for el in els:
-                    t = (el.inner_text() or "").strip()
-                    if t and len(t) > 2:
-                        status_text = t
-                        print(f"  Status found via '{sel}': {t!r}")
+            # 1. Extract status code from modal table: line after "Remark" header
+            lines = [l.strip() for l in body_text.splitlines()]
+            for i, line in enumerate(lines):
+                if line.lower() == "remark" and i + 1 < len(lines):
+                    candidate = lines[i + 1].strip()
+                    if candidate and candidate.upper() != "N/A" and len(candidate) < 60:
+                        status_text = candidate
+                        print(f"  Status from modal table: {status_text!r}")
                         break
-                if status_text:
-                    break
+                    # Keep looking — "N/A" means status is on a later line
+                    for j in range(i + 1, min(i + 5, len(lines))):
+                        c = lines[j].strip()
+                        if c and c.upper() not in ("N/A", "") and len(c) < 60:
+                            status_text = c
+                            print(f"  Status from modal table (skip N/A): {status_text!r}")
+                            break
+                    if status_text:
+                        break
 
-            # Fallback: keyword scan
+            # 2. Keyword scan with hyphenated variants
             if not status_text:
                 for keyword in [
+                    "UNDER-PROCESS", "Under-Process",
                     "Application Received", "Under Process", "Under Scrutiny",
-                    "Approved", "Dispatched", "Rejected", "Pending",
+                    "Approved", "Dispatched", "Rejected", "Pending", "Acknowledged",
                 ]:
                     if keyword.lower() in body_text.lower():
                         status_text = keyword
-                        print(f"  Status found via keyword scan: {keyword!r}")
+                        print(f"  Status from keyword scan: {status_text!r}")
                         break
+
+            # 3. Notes fallback (gives context even without a status code)
+            if not status_text:
+                notes = re.findall(r"Note\s*:\s*([^\n]+)", body_text)
+                if notes:
+                    status_text = "Note: " + notes[0].strip()
+                    print(f"  Status from Note fallback: {status_text!r}")
 
             if not status_text:
                 print("  Could not extract status — check screenshot and trace.")
-                page.screenshot(path=str(SCREENSHOT_DIR / "04_status_not_found.png"))
+                page.screenshot(path=str(SCREENSHOT_DIR / "06_status_not_found.png"))
             else:
-                page.screenshot(path=str(SCREENSHOT_DIR / "04_status_found.png"))
+                page.screenshot(path=str(SCREENSHOT_DIR / "06_status_found.png"))
 
             return status_text
 
