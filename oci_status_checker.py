@@ -99,17 +99,21 @@ def _solve_captcha_claude(img_bytes: bytes) -> str | None:
             ]
         }]
     }
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=json.dumps(payload).encode(),
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        method="POST"
-    )
-    resp = urllib.request.urlopen(req, timeout=15)
-    data = json.loads(resp.read())
-    result = re.sub(r"[^A-Za-z0-9]", "", data["content"][0]["text"].strip())
-    print(f"  Claude Vision result: {result!r}")
-    return result if result else None
+    try:
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(payload).encode(),
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            method="POST"
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        data = json.loads(resp.read())
+        result = re.sub(r"[^A-Za-z0-9]", "", data["content"][0]["text"].strip())
+        print(f"  Claude Vision result: {result!r}")
+        return result if result else None
+    except Exception as e:
+        print(f"  Claude Vision failed ({e}) — falling back to pytesseract")
+        return None
 
 
 def _solve_captcha_tesseract(img_bytes: bytes, attempt_num: int) -> str | None:
