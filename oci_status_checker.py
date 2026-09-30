@@ -95,7 +95,7 @@ def _solve_captcha_claude(img_bytes: bytes) -> str | None:
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
-                {"type": "text", "text": "Read the CAPTCHA text exactly — letters and digits, case-sensitive. Reply with ONLY the captcha characters, no spaces or explanation."}
+                {"type": "text", "text": "Read the CAPTCHA text exactly — letters and digits, case-sensitive. Some characters may appear smaller or subscript but are still part of the code. Count every character carefully. Reply with ONLY the captcha characters, no spaces or explanation."}
             ]
         }]
     }
