@@ -1,0 +1,51 @@
+name: OCI Status Checker
+
+on:
+  workflow_dispatch:          # triggered by cron-job.org
+
+permissions:
+  actions: write              # needed to update LAST_KNOWN_STATUS variable
+
+jobs:
+  check-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run OCI status checker
+        env:
+          OCI_EMAIL:          ${{ secrets.OCI_EMAIL }}
+          OCI_PASSWORD:       ${{ secrets.OCI_PASSWORD }}
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
+          LAST_KNOWN_STATUS:  ${{ vars.LAST_KNOWN_STATUS }}
+          GH_TOKEN:           ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY:  ${{ github.repository }}
+          GH_RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_RUN_NUMBER:      ${{ github.run_number }}
+        run: |
+          set +e
+          python3 oci_status_checker.py
+          EXIT=$?
+          if [ $EXIT -eq 2 ]; then exit 2; fi
+          exit 0
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-screenshot-${{ github.run_number }}
+          path: /tmp/oci_status_screenshots/run_summary.png
+          if-no-files-found: ignore
+          retention-days: 7
