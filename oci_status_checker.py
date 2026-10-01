@@ -221,7 +221,7 @@ def check_status() -> str | None:
 
             # Fill credentials
             email_sel = "input[placeholder*='Email' i], input[type='email'], input[name*='email' i], input[id*='email' i]"
-            page.wait_for_selector(email_sel, timeout=10000)
+            page.wait_for_selector(email_sel, timeout=30000)
             page.fill(email_sel, OCI_EMAIL)
             page.fill("input[type='password']", OCI_PASSWORD)
 
